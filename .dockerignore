@@ -1,0 +1,60 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Dependencies cache
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+
+# Build artifacts
+dist/
+build/
+coverage/
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+Jenkinsfile
+
+# Documentation
+docs/
+README.md
+CONTRIBUTING.md
+CHANGELOG.md
+
+# Testing
+tests/
+jest.config.js
+*.test.ts
+*.test.js
+
+# Development
+nodemon.json
+debug.log
+logs/
+
+# Temporary
+tmp/
+temp/
+*.bak

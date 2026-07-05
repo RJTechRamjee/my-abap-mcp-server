@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  abap-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    
+    container_name: abap-mcp-server
+    
+    environment:
+      # SAP System Configuration - CHANGE THESE VALUES
+      SAP_HOST: ${SAP_HOST:-https://sap-system.example.com:44300}
+      SAP_CLIENT: ${SAP_CLIENT:-100}
+      SAP_USER: ${SAP_USER:-ABAPDEV}
+      SAP_PASSWORD: ${SAP_PASSWORD:-password}
+      
+      # Optional: Logging configuration
+      # LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # DEBUG_MODE: ${DEBUG_MODE:-false}
+    
+    # Volume for persistent logs
+    volumes:
+      - ./logs:/app/logs
+      - ./debug.log:/app/debug.log
+    
+    # Port (not needed if using stdio transport, but available if adding HTTP)
+    # ports:
+    #   - "3000:3000"
+    
+    # Keep container running
+    stdin_open: true
+    tty: true
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 512M
+        reservations:
+          cpus: '1'
+          memory: 256M
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    
+    # Read-only root filesystem (optional, stricter security)
+    # read_only: true
+
+# Optional: Add volume for persistent data
+# volumes:
+#   logs:
+#     driver: local

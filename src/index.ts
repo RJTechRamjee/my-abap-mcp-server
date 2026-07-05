@@ -11,11 +11,35 @@ import * as path from 'path';
 
 dotenv.config();
 
-// Debug logging to file only (NOT to console to avoid corrupting MCP protocol)
+// ============================================================================
+// LOGGING & DIAGNOSTICS
+// ============================================================================
+
 const debugLogFile = path.join(process.cwd(), 'debug.log');
-function debugLog(message: string) {
+
+interface LogLevel {
+  ERROR: 'ERROR';
+  WARN: 'WARN';
+  INFO: 'INFO';
+  DEBUG: 'DEBUG';
+}
+
+const LOG_LEVELS: LogLevel = {
+  ERROR: 'ERROR',
+  WARN: 'WARN',
+  INFO: 'INFO',
+  DEBUG: 'DEBUG'
+};
+
+function structuredLog(level: string, message: string, data?: any) {
   const timestamp = new Date().toISOString();
-  const logLine = `[${timestamp}] ${message}\n`;
+  const logEntry = {
+    timestamp,
+    level,
+    message,
+    ...(data && { data })
+  };
+  const logLine = `[${timestamp}] [${level}] ${message}${data ? ' | ' + JSON.stringify(data) : ''}\n`;
   try {
     fs.appendFileSync(debugLogFile, logLine);
   } catch (e) {
@@ -23,23 +47,124 @@ function debugLog(message: string) {
   }
 }
 
+function debugLog(message: string) {
+  structuredLog(LOG_LEVELS.DEBUG, message);
+}
+
+function errorLog(message: string, error?: any) {
+  structuredLog(LOG_LEVELS.ERROR, message, error);
+}
+
+function warnLog(message: string, data?: any) {
+  structuredLog(LOG_LEVELS.WARN, message, data);
+}
+
+// ============================================================================
+// INPUT VALIDATION & SANITIZATION
+// ============================================================================
+
+// Valid transport ID pattern: alphanumeric, typically 10-12 chars (e.g., S4HK900123, DEVK123456)
+const TRANSPORT_ID_REGEX = /^[A-Za-z0-9]{1,20}$/;
+const MAX_TRANSPORT_ID_LENGTH = 20;
+
+function validateTransportId(transportId: string): { valid: boolean; error?: string } {
+  if (!transportId) {
+    return { valid: false, error: 'Transport ID cannot be empty' };
+  }
+
+  if (typeof transportId !== 'string') {
+    return { valid: false, error: 'Transport ID must be a string' };
+  }
+
+  const trimmedId = transportId.trim();
+
+  if (trimmedId.length === 0) {
+    return { valid: false, error: 'Transport ID cannot be whitespace only' };
+  }
+
+  if (trimmedId.length > MAX_TRANSPORT_ID_LENGTH) {
+    return { valid: false, error: `Transport ID exceeds maximum length of ${MAX_TRANSPORT_ID_LENGTH}` };
+  }
+
+  if (!TRANSPORT_ID_REGEX.test(trimmedId)) {
+    return { valid: false, error: 'Transport ID contains invalid characters. Use only alphanumeric characters.' };
+  }
+
+  return { valid: true };
+}
+
+function sanitizeTransportId(transportId: string): string {
+  return transportId.trim().toUpperCase();
+}
+
+// ============================================================================
+// DEBUG LOGGING (ORIGINAL FUNCTION PRESERVED)
+// ============================================================================
+
 // Load environment variables
 const SAP_HOST = process.env.SAP_HOST;
 const SAP_CLIENT = process.env.SAP_CLIENT || '100';
 const SAP_USER = process.env.SAP_USER;
 const SAP_PASSWORD = process.env.SAP_PASSWORD;
 
-if (!SAP_HOST || !SAP_USER || !SAP_PASSWORD) {
-  console.error("Missing SAP connection credentials in .env file.");
+// ============================================================================
+// STARTUP VALIDATION
+// ============================================================================
+
+function validateStartupConfiguration(): string[] {
+  const errors: string[] = [];
+
+  if (!SAP_HOST) {
+    errors.push('SAP_HOST is not set. Required: Full URL to SAP system (e.g., https://sap.company.com:44300)');
+  } else if (!SAP_HOST.startsWith('http://') && !SAP_HOST.startsWith('https://')) {
+    errors.push('SAP_HOST must start with http:// or https://');
+  }
+
+  if (!SAP_USER) {
+    errors.push('SAP_USER is not set. Required: ABAP user with S_TRANSPRT and S_DEVELOP authorizations');
+  }
+
+  if (!SAP_PASSWORD) {
+    errors.push('SAP_PASSWORD is not set. Required: Password for SAP user account');
+  }
+
+  if (SAP_CLIENT && isNaN(parseInt(SAP_CLIENT))) {
+    errors.push('SAP_CLIENT must be a numeric value (0-999)');
+  }
+
+  return errors;
+}
+
+const startupErrors = validateStartupConfiguration();
+if (startupErrors.length > 0) {
+  console.error('\n❌ STARTUP CONFIGURATION ERROR\n');
+  console.error('Missing or invalid environment variables:\n');
+  startupErrors.forEach((error, index) => {
+    console.error(`${index + 1}. ${error}`);
+  });
+  console.error('\n📋 SETUP INSTRUCTIONS:\n');
+  console.error('1. Copy .env.example to .env');
+  console.error('2. Edit .env and fill in all required values');
+  console.error('3. Required SAP user authorizations:');
+  console.error('   - S_TRANSPRT: Transport Management');
+  console.error('   - S_DEVELOP: ABAP Development');
+  console.error('\n💡 For more details, see README.md\n');
   process.exit(1);
 }
+
+debugLog('='.repeat(80));
+debugLog('MCP SERVER STARTUP - Configuration validated');
+debugLog(`SAP Host: ${SAP_HOST}`);
+debugLog(`SAP Client: ${SAP_CLIENT}`);
+debugLog(`SAP User: ${SAP_USER}`);
+debugLog('='.repeat(80));
 
 // Instantiate HTTP Client (Defaults are isolated to auth to prevent header pollution)
 const adtClient: AxiosInstance = axios.create({
   baseURL: `${SAP_HOST}/sap/bc/adt`,
   auth: {
-    username: SAP_USER,
-    password: SAP_PASSWORD
+    username: SAP_USER!,
+    password: SAP_PASSWORD!
   },
   headers: {
     'sap-client': SAP_CLIENT
@@ -518,46 +643,82 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name } = request.params;
   const { transportId } = request.params.arguments as { transportId: string };
 
-  debugLog(`=== TOOL CALLED: ${name} with transport ${transportId} ===`);
+  // Validate input
+  const validationResult = validateTransportId(transportId);
+  if (!validationResult.valid) {
+    errorLog(`Invalid transport ID provided: ${transportId}`, { error: validationResult.error });
+    return {
+      content: [{ 
+        type: 'text', 
+        text: `❌ **Input Validation Error**\n\n**Transport ID:** "${transportId}"\n\n**Error:** ${validationResult.error}\n\n**Expected Format:**\n- Alphanumeric characters only (A-Z, 0-9)\n- Length: 1-${MAX_TRANSPORT_ID_LENGTH} characters\n- Examples: S4HK900123, DEVK900456, TR123456\n\n**Please provide a valid transport ID and try again.**` 
+      }],
+      isError: true
+    };
+  }
+
+  const sanitizedTransportId = sanitizeTransportId(transportId);
+  debugLog(`=== TOOL CALLED: ${name} with transport ${sanitizedTransportId} ===`);
 
   try {
     // FR-1: Get Transport Metadata
     if (name === 'get_transport_metadata') {
-      const metadata = await getTransportMetadata(transportId);
+      debugLog(`Fetching metadata for transport: ${sanitizedTransportId}`);
+      const metadata = await getTransportMetadata(sanitizedTransportId);
       const metadataJson = JSON.stringify(metadata, null, 2);
+      debugLog(`Successfully retrieved metadata for ${sanitizedTransportId}`);
       return {
         content: [{ 
           type: 'text', 
-          text: `# Transport Metadata - ${transportId}\n\n${metadataJson}`
+          text: `# Transport Metadata - ${sanitizedTransportId}\n\n${metadataJson}`
         }]
       };
     }
 
     // FR-2 & FR-3: Analyze Transport Changes with Risk Assessment
     if (name === 'analyze_transport_changes') {
+      debugLog(`Starting analysis for transport: ${sanitizedTransportId}`);
       let objects: ABAPObject[] = [];
       let metadata: TransportMetadata;
       
       try {
-        metadata = await getTransportMetadata(transportId);
+        debugLog(`Retrieving metadata for ${sanitizedTransportId}`);
+        metadata = await getTransportMetadata(sanitizedTransportId);
       } catch (err: any) {
+        errorLog(`Failed to retrieve transport metadata`, { transportId: sanitizedTransportId, error: err.message });
+        
+        // Provide detailed error diagnostics
+        const statusCode = err.response?.status;
+        let userMessage = '';
+
+        if (statusCode === 401) {
+          userMessage = `**Authorization Failed (401)**\n\nPossible causes:\n- Invalid SAP credentials\n- Insufficient user authorizations (missing S_TRANSPRT or S_DEVELOP)\n- SAP user account locked or expired\n\n**Actions to take:**\n1. Verify SAP username and password in .env\n2. Check user has S_TRANSPRT and S_DEVELOP roles in SAP\n3. Run transaction SUIM to verify role assignments\n4. Contact your SAP administrator if issues persist`;
+        } else if (statusCode === 404) {
+          userMessage = `**Transport Not Found (404)**\n\nThe transport ID "${sanitizedTransportId}" does not exist or is not accessible.\n\n**Verification steps:**\n1. Confirm the transport ID is correct (case-sensitive in some systems)\n2. Check if transport is released (use SAP transaction SE10 or SE09)\n3. Verify user has authorization to view this transport\n4. Try a different transport ID to test connectivity\n\n**Transport Status Check:**\n- Released transports: Can be imported\n- Modifiable transports: Still in development\n- Imported transports: Already in target system`;
+        } else if (statusCode >= 500) {
+          userMessage = `**SAP Backend Error (${statusCode})**\n\nThe SAP system returned a server error. This could indicate:\n- SAP system is under maintenance\n- ADT service is temporarily unavailable\n- Database connectivity issues\n\n**Recommended actions:**\n1. Wait a few moments and retry\n2. Check SAP system health (transaction SM50, AL11)\n3. Contact SAP operations team\n4. Review debug.log for detailed error traces`;
+        } else {
+          userMessage = `**Connection Error**\n\n${err.message}\n\n**Common causes:**\n- SAP_HOST URL is incorrect or unreachable\n- Network connectivity issues\n- Firewall blocking connection\n- SSL certificate validation failed\n\n**Verification:**\n1. Test connectivity: ping ${(process.env.SAP_HOST || 'your-sap-host').split('://')[1]?.split(':')[0]}\n2. Verify SAP_HOST in .env is correct\n3. Check firewall rules allow HTTPS to port 44300`;
+        }
+
         return {
           content: [{ 
             type: 'text', 
-            text: `**Error retrieving transport metadata**: ${err.message}\n\nPlease verify:\n- Transport ID "${transportId}" is valid\n- You have proper SAP authorization (S_DEVELOP, S_TRANSPRT)\n- The transport exists in the system` 
+            text: `# ❌ Transport Analysis Failed\n\n${userMessage}` 
           }],
           isError: true
         };
       }
 
       try {
-        objects = await getObjectsFromTransport(transportId);
+        debugLog(`Fetching objects for transport: ${sanitizedTransportId}`);
+        objects = await getObjectsFromTransport(sanitizedTransportId);
+        debugLog(`Retrieved ${objects.length} objects from transport`);
       } catch (err: any) {
-        debugLog(`Failed to get objects for transport ${transportId}: ${err}`);
+        warnLog(`Failed to get objects for transport ${sanitizedTransportId}`, err);
       }
 
       if (objects.length === 0) {
-        let diagnosticMsg = `# TRANSPORT ANALYSIS - ${transportId}\n\n`;
+        let diagnosticMsg = `# TRANSPORT ANALYSIS - ${sanitizedTransportId}\n\n`;
         diagnosticMsg += `## Transport Information\n`;
         diagnosticMsg += `- **Transport ID:** ${metadata.transportId}\n`;
         diagnosticMsg += `- **Description:** ${metadata.description}\n`;
@@ -568,7 +729,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         diagnosticMsg += `- **Object Count:** ${metadata.objectCount}\n\n`;
         
         diagnosticMsg += `## Analysis Result\n`;
-        diagnosticMsg += `⚠️ No ABAP source code objects found in transport ${transportId}.\n\n`;
+        diagnosticMsg += `⚠️ No ABAP source code objects found in transport ${sanitizedTransportId}.\n\n`;
         
         diagnosticMsg += `## Object Type Details\n`;
         diagnosticMsg += `- **Code-Carrying Objects Searched:** CLAS, PROG, FUGR, INTF, FUNC, TABL, VIEW, TYPE, ENPD, ENHS\n`;
@@ -610,7 +771,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       let analysisReport = `# TRANSPORT CODE ANALYSIS REPORT\n`;
-      analysisReport += `**Transport ID:** ${transportId}\n`;
+      analysisReport += `**Transport ID:** ${sanitizedTransportId}\n`;
       analysisReport += `**Description:** ${metadata.description}\n`;
       analysisReport += `**Owner:** ${metadata.owner}\n`;
       analysisReport += `**Status:** ${metadata.status}\n`;
@@ -622,6 +783,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
       let totalMediumRisks = 0;
 
       for (const obj of objects) {
+        debugLog(`Analyzing object: ${obj.type}:${obj.name}`);
         const currentCode = await getObjectSource(obj);
         const previousCode = await getPreviousObjectSource(obj);
 
@@ -698,6 +860,8 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
       analysisReport += `- Test for backward compatibility with existing implementations\n`;
       analysisReport += `- Validate hardcoded values are environment-appropriate\n`;
 
+      debugLog(`Analysis completed for transport ${sanitizedTransportId}. High-risk: ${totalHighRisks}, Medium-risk: ${totalMediumRisks}`);
+
       return {
         content: [{ type: 'text', text: analysisReport }]
       };
@@ -709,12 +873,12 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
 
   } catch (error: any) {
-    console.error(`Tool execution error for ${name} with transport ${transportId}:`, error);
+    errorLog(`Unexpected error during tool execution`, { tool: name, transportId: sanitizedTransportId, error: error.message });
     
     const errorMessage = error.response?.status === 401 
       ? `Authorization Failed: Invalid SAP credentials or insufficient permissions. Verify S_DEVELOP, S_TRANSPRT authorities.`
       : error.response?.status === 404
-      ? `Transport Not Found: Transport ID "${transportId}" does not exist or is not accessible.`
+      ? `Transport Not Found: Transport ID "${sanitizedTransportId}" does not exist or is not accessible.`
       : `Execution failed: ${error.message}`;
 
     return {
@@ -726,11 +890,53 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 // Start connection logic inside safe async function to avoid top-level await errors in CommonJS
 async function runServer() {
-  const transport = new StdioServerTransport();
-  await mcpServer.connect(transport);
+  try {
+    debugLog('Initializing MCP Server...');
+    const transport = new StdioServerTransport();
+    
+    debugLog('Connecting to MCP transport...');
+    await mcpServer.connect(transport);
+    
+    debugLog('✅ MCP Server successfully connected and ready to handle requests');
+    debugLog(`Available tools: get_transport_metadata, analyze_transport_changes`);
+  } catch (error: any) {
+    errorLog('Fatal error during MCP server startup', { error: error.message, stack: error.stack });
+    console.error('\n❌ FATAL ERROR - MCP Server Initialization Failed\n');
+    console.error(`Error: ${error.message}\n`);
+    
+    if (error.message.includes('ECONNREFUSED')) {
+      console.error('Possible causes:');
+      console.error('- MCP protocol communication error');
+      console.error('- Parent process not properly configured');
+      console.error('- Transport protocol mismatch');
+    } else if (error.message.includes('ENOENT')) {
+      console.error('File not found error - check project structure');
+    }
+    
+    console.error('\n💡 Troubleshooting:');
+    console.error('1. Check debug.log for detailed error traces');
+    console.error('2. Verify Node.js version is 18+');
+    console.error('3. Ensure dependencies installed: npm install');
+    console.error('4. Review README.md for setup instructions\n');
+    
+    process.exit(1);
+  }
 }
 
+// Start the server with graceful shutdown handling
 runServer().catch((error) => {
+  errorLog('Unhandled error running MCP server', { error: error.message });
   console.error("Fatal error running MCP server:", error);
   process.exit(1);
+});
+
+// Handle graceful shutdown
+process.on('SIGTERM', () => {
+  debugLog('SIGTERM signal received: closing MCP server gracefully');
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  debugLog('SIGINT signal received: closing MCP server gracefully');
+  process.exit(0);
 });
